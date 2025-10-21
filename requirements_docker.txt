@@ -1,0 +1,43 @@
+# Cosmos CT Multiview - Docker Requirements
+# For use with nvcr.io/nvidia/nemo:2.5 container
+
+# Core dependencies (lightweight, not in base container)
+einops>=0.7.0
+nvidia-ml-py>=12.535.133  # Replaces deprecated pynvml
+
+# 3D rendering dependencies (PyTorch3D installed separately)
+# NOTE: PyTorch3D must be installed SEPARATELY with --no-build-isolation flag
+fvcore
+iopath
+
+# Computer vision extras
+opencv-python>=4.8.0
+Pillow>=10.0.0
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.9
+
+# Scientific computing (may need upgrade)
+scipy>=1.11.0
+
+# Configuration management
+omegaconf>=2.3.0
+hydra-core>=1.3.0
+
+# Utilities
+tqdm>=4.66.0
+rich>=13.0.0
+loguru>=0.7.0
+
+# Visualization (tensorboard likely in NeMo, but ensure version)
+wandb>=0.15.0
+matplotlib>=3.7.0
+tensorboard>=2.14.0
+
+# Data processing
+pandas>=2.0.0
+h5py>=3.9.0
+numpy==1.26.4
+
+# Configuration files
+pyyaml>=6.0
+
