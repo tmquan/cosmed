@@ -1,51 +1,49 @@
-import os
 import glob
-from typing import Callable, Optional, Sequence, List, Dict
+import os
 from argparse import ArgumentParser
+from typing import Callable, Dict, List, Optional, Sequence
 
-from pytorch_lightning import seed_everything
-seed = seed_everything(21, workers=True)
-
-from monai.data import CacheDataset, ThreadDataLoader
-from monai.data import list_data_collate
-from monai.utils import set_determinism
+import torch
+from monai.data import CacheDataset, ThreadDataLoader, list_data_collate
 from monai.transforms import (
-    apply_transform,
-    Randomizable,
     Compose,
-    EnsureChannelFirstDict,
-    LoadImageDict,
-    SpacingDict,
-    OrientationDict,
-    DivisiblePadDict,
     CropForegroundDict,
-    ResizeDict,
-    Rotate90Dict,
-    TransposeDict,
+    DivisiblePadDict,
+    EnsureChannelFirstDict,
+    HistogramNormalizeDict,
+    LoadImageDict,
+    MapTransform,
+    OrientationDict,
     RandFlipDict,
-    RandZoomDict,
+    RandGaussianNoiseDict,
+    RandRotateDict,
     RandShiftIntensityDict,
     RandStdShiftIntensityDict,
-    ZoomDict,
-    RandRotateDict,
-    RandGaussianNoiseDict,
-    HistogramNormalizeDict,
+    RandZoomDict,
+    Randomizable,
+    ResizeDict,
+    Rotate90Dict,
     ScaleIntensityDict,
     ScaleIntensityRangeDict,
+    SpacingDict,
     ToTensorDict,
-    MapTransform,
+    TransposeDict,
+    ZoomDict,
+    apply_transform,
 )
-import torch
+from monai.utils import set_determinism
+from pytorch_lightning import LightningDataModule, seed_everything
 
-from pytorch_lightning import LightningDataModule
+seed_everything(21, workers=True)
 
 
 class ClipMinIntensityDict(MapTransform):
     """Clip intensity values to a minimum threshold, leave max unbounded."""
+
     def __init__(self, keys, min_val: float = -512):
         super().__init__(keys)
         self.min_val = min_val
-    
+
     def __call__(self, data):
         d = dict(data)
         for key in self.keys:
@@ -98,12 +96,13 @@ class UnpairedDataset(CacheDataset, Randomizable):
 class UnpairedDataModule(LightningDataModule):
     def __init__(
         self,
-        train_image3d_folders: str = "path/to/folder",
-        train_image2d_folders: str = "path/to/folder",
-        val_image3d_folders: str = "path/to/folder",
-        val_image2d_folders: str = "path/to/folder",
-        test_image3d_folders: str = "path/to/folder",
-        test_image2d_folders: str = "path/to/dir",
+        datadir: str = "/workspace/data",
+        train_image3d_folders: list[str] | None = None,
+        train_image2d_folders: list[str] | None = None,
+        val_image3d_folders: list[str] | None = None,
+        val_image2d_folders: list[str] | None = None,
+        test_image3d_folders: list[str] | None = None,
+        test_image2d_folders: list[str] | None = None,
         train_samples: int = 1000,
         val_samples: int = 400,
         test_samples: int | None = None,
@@ -118,7 +117,43 @@ class UnpairedDataModule(LightningDataModule):
         self.img_shape = img_shape
         self.vol_shape = vol_shape
         self.num_workers = num_workers
-        # self.setup()
+        self.datadir = datadir
+        
+        # Set default folders if not provided
+        if train_image3d_folders is None:
+            train_image3d_folders = [
+                os.path.join(datadir, "ChestXRLungSegmentation/NSCLC/processed/train/images"),
+                os.path.join(datadir, "ChestXRLungSegmentation/MOSMED/processed/train/images/CT-0"),
+                os.path.join(datadir, "ChestXRLungSegmentation/MOSMED/processed/train/images/CT-1"),
+                os.path.join(datadir, "ChestXRLungSegmentation/MOSMED/processed/train/images/CT-2"),
+                os.path.join(datadir, "ChestXRLungSegmentation/MOSMED/processed/train/images/CT-3"),
+                os.path.join(datadir, "ChestXRLungSegmentation/MOSMED/processed/train/images/CT-4"),
+                os.path.join(datadir, "ChestXRLungSegmentation/Imagenglab/processed/train/images"),
+            ]
+        
+        if train_image2d_folders is None:
+            train_image2d_folders = [
+                os.path.join(datadir, "ChestXRLungSegmentation/VinDr/v1/processed/train/images/"),
+            ]
+        
+        if val_image3d_folders is None:
+            val_image3d_folders = train_image3d_folders
+        
+        if val_image2d_folders is None:
+            val_image2d_folders = [
+                os.path.join(datadir, "ChestXRLungSegmentation/VinDr/v1/processed/test/images/"),
+            ]
+        
+        if test_image3d_folders is None:
+            test_image3d_folders = [
+                os.path.join(datadir, "ChestXRLungSegmentation/TCIA/images/"),
+            ]
+        
+        if test_image2d_folders is None:
+            test_image2d_folders = [
+                os.path.join(datadir, "ChestXRLungSegmentation/VinDr/v1/processed/test/images/"),
+            ]
+        
         self.train_image3d_folders = train_image3d_folders
         self.train_image2d_folders = train_image2d_folders
         self.val_image3d_folders = val_image3d_folders
@@ -129,9 +164,9 @@ class UnpairedDataModule(LightningDataModule):
         self.val_samples = val_samples
         self.test_samples = test_samples
 
-        # self.setup()
-        def glob_files(folders: str = None, extension: str = "*.nii.gz"):
-            assert folders is not None
+        def glob_files(folders: List[str], extension: str = "*.nii.gz") -> List[str]:
+            """Glob files from multiple folders with given extension pattern."""
+            assert folders is not None, "folders parameter cannot be None"
             paths = [
                 glob.glob(os.path.join(folder, extension), recursive=True)
                 for folder in folders
@@ -168,27 +203,27 @@ class UnpairedDataModule(LightningDataModule):
     def train_dataloader(self):
         self.train_transforms = Compose([
             LoadImageDict(keys=["image3d", "image2d"]),
-            EnsureChannelFirstDict(keys=["image3d", "image2d"],),
-            SpacingDict(keys=["image3d"], pixdim=(1.0, 1.0, 1.0), mode=["bilinear"], align_corners=True,),
+            EnsureChannelFirstDict(keys=["image3d", "image2d"]),
+            SpacingDict(keys=["image3d"], pixdim=(1.0, 1.0, 1.0), mode=["bilinear"], align_corners=True),
             Rotate90Dict(keys=["image2d"], k=3),
             RandFlipDict(keys=["image2d"], prob=1.0, spatial_axis=1),
-            OrientationDict(keys=("image3d"), axcodes="ASL"),
-            ScaleIntensityDict(keys=["image2d"], minv=0.0, maxv=1.0,),
-            HistogramNormalizeDict(keys=["image2d"], min=0.0, max=1.0,),
+            OrientationDict(keys=["image3d"], axcodes="ASL"),
+            ScaleIntensityDict(keys=["image2d"], minv=0.0, maxv=1.0),
+            HistogramNormalizeDict(keys=["image2d"], min=0.0, max=1.0),
             ClipMinIntensityDict(keys=["image3d"], min_val=-512),
             ScaleIntensityDict(keys=["image3d"], minv=0.0, maxv=1.0),
-            RandShiftIntensityDict(keys=["image3d"], prob=1.0, offsets=0.05, safe=True,),
-            RandStdShiftIntensityDict(keys=["image3d"], prob=1.0, factors=0.05, nonzero=True,),
-            RandZoomDict(keys=["image3d"], prob=1.0, min_zoom=0.65, max_zoom=1.15, padding_mode="constant", mode=["trilinear"], align_corners=True,),
-            RandZoomDict(keys=["image2d"], prob=1.0, min_zoom=0.95, max_zoom=1.15, padding_mode="constant", mode=["area"],),
-            CropForegroundDict(keys=["image2d"], source_key="image2d", select_fn=(lambda x: x > 0), margin=0,),
+            RandShiftIntensityDict(keys=["image3d"], prob=1.0, offsets=0.05, safe=True),
+            RandStdShiftIntensityDict(keys=["image3d"], prob=1.0, factors=0.05, nonzero=True),
+            RandZoomDict(keys=["image3d"], prob=1.0, min_zoom=0.65, max_zoom=1.15, padding_mode="constant", mode=["trilinear"], align_corners=True),
+            RandZoomDict(keys=["image2d"], prob=1.0, min_zoom=0.95, max_zoom=1.15, padding_mode="constant", mode=["area"]),
+            CropForegroundDict(keys=["image2d"], source_key="image2d", select_fn=(lambda x: x > 0), margin=0),
             ZoomDict(keys=["image3d"], zoom=0.95, padding_mode="constant", mode=["area"]),
             ZoomDict(keys=["image2d"], zoom=0.95, padding_mode="constant", mode=["area"]),
-            ResizeDict(keys=["image3d"], spatial_size=self.vol_shape, size_mode="longest", mode=["trilinear"], align_corners=True,),
-            ResizeDict(keys=["image2d"], spatial_size=self.img_shape, size_mode="longest", mode=["area"],),
-            DivisiblePadDict(keys=["image3d"], k=self.vol_shape, mode="constant", constant_values=0,),
-            DivisiblePadDict(keys=["image2d"], k=self.img_shape, mode="constant", constant_values=0,),
-            ToTensorDict(keys=["image3d", "image2d"],),
+            ResizeDict(keys=["image3d"], spatial_size=self.vol_shape, size_mode="longest", mode=["trilinear"], align_corners=True),
+            ResizeDict(keys=["image2d"], spatial_size=self.img_shape, size_mode="longest", mode=["area"]),
+            DivisiblePadDict(keys=["image3d"], k=self.vol_shape, mode="constant", constant_values=0),
+            DivisiblePadDict(keys=["image2d"], k=self.img_shape, mode="constant", constant_values=0),
+            ToTensorDict(keys=["image3d", "image2d"]),
         ])
 
         self.train_datasets = UnpairedDataset(
@@ -212,23 +247,23 @@ class UnpairedDataModule(LightningDataModule):
     def val_dataloader(self):
         self.val_transforms = Compose([
             LoadImageDict(keys=["image3d", "image2d"]),
-            EnsureChannelFirstDict(keys=["image3d", "image2d"],),
-            SpacingDict(keys=["image3d"], pixdim=(1.0, 1.0, 1.0), mode=["bilinear"], align_corners=True,),
+            EnsureChannelFirstDict(keys=["image3d", "image2d"]),
+            SpacingDict(keys=["image3d"], pixdim=(1.0, 1.0, 1.0), mode=["bilinear"], align_corners=True),
             Rotate90Dict(keys=["image2d"], k=3),
             RandFlipDict(keys=["image2d"], prob=1.0, spatial_axis=1),
-            OrientationDict(keys=("image3d"), axcodes="ASL"),
-            ScaleIntensityDict(keys=["image2d"], minv=0.0, maxv=1.0,),
-            HistogramNormalizeDict(keys=["image2d"], min=0.0, max=1.0,),
+            OrientationDict(keys=["image3d"], axcodes="ASL"),
+            ScaleIntensityDict(keys=["image2d"], minv=0.0, maxv=1.0),
+            HistogramNormalizeDict(keys=["image2d"], min=0.0, max=1.0),
             ClipMinIntensityDict(keys=["image3d"], min_val=-512),
             ScaleIntensityDict(keys=["image3d"], minv=0.0, maxv=1.0),
-            CropForegroundDict(keys=["image2d"], source_key="image2d", select_fn=(lambda x: x > 0), margin=0,),
+            CropForegroundDict(keys=["image2d"], source_key="image2d", select_fn=(lambda x: x > 0), margin=0),
             ZoomDict(keys=["image3d"], zoom=0.95, padding_mode="constant", mode=["area"]),
             ZoomDict(keys=["image2d"], zoom=0.95, padding_mode="constant", mode=["area"]),
-            ResizeDict(keys=["image3d"], spatial_size=self.vol_shape, size_mode="longest", mode=["trilinear"], align_corners=True,),
-            ResizeDict(keys=["image2d"], spatial_size=self.img_shape, size_mode="longest", mode=["area"],),
-            DivisiblePadDict(keys=["image3d"], k=self.vol_shape, mode="constant", constant_values=0,),
-            DivisiblePadDict(keys=["image2d"], k=self.img_shape, mode="constant", constant_values=0,),
-            ToTensorDict(keys=["image3d", "image2d"],),
+            ResizeDict(keys=["image3d"], spatial_size=self.vol_shape, size_mode="longest", mode=["trilinear"], align_corners=True),
+            ResizeDict(keys=["image2d"], spatial_size=self.img_shape, size_mode="longest", mode=["area"]),
+            DivisiblePadDict(keys=["image3d"], k=self.vol_shape, mode="constant", constant_values=0),
+            DivisiblePadDict(keys=["image2d"], k=self.img_shape, mode="constant", constant_values=0),
+            ToTensorDict(keys=["image3d", "image2d"]),
         ])
 
         self.val_datasets = UnpairedDataset(
@@ -252,23 +287,23 @@ class UnpairedDataModule(LightningDataModule):
     def test_dataloader(self):
         self.test_transforms = Compose([
             LoadImageDict(keys=["image3d", "image2d"]),
-            EnsureChannelFirstDict(keys=["image3d", "image2d"],),
-            SpacingDict(keys=["image3d"], pixdim=(1.0, 1.0, 1.0), mode=["bilinear"], align_corners=True,),
+            EnsureChannelFirstDict(keys=["image3d", "image2d"]),
+            SpacingDict(keys=["image3d"], pixdim=(1.0, 1.0, 1.0), mode=["bilinear"], align_corners=True),
             Rotate90Dict(keys=["image2d"], k=3),
             RandFlipDict(keys=["image2d"], prob=1.0, spatial_axis=1),
-            OrientationDict(keys=("image3d"), axcodes="ASL"),
-            ScaleIntensityDict(keys=["image2d"], minv=0.0, maxv=1.0,),
-            HistogramNormalizeDict(keys=["image2d"], min=0.0, max=1.0,),
+            OrientationDict(keys=["image3d"], axcodes="ASL"),
+            ScaleIntensityDict(keys=["image2d"], minv=0.0, maxv=1.0),
+            HistogramNormalizeDict(keys=["image2d"], min=0.0, max=1.0),
             ClipMinIntensityDict(keys=["image3d"], min_val=-512),
             ScaleIntensityDict(keys=["image3d"], minv=0.0, maxv=1.0),
-            CropForegroundDict(keys=["image2d"], source_key="image2d", select_fn=(lambda x: x > 0), margin=0,),
+            CropForegroundDict(keys=["image2d"], source_key="image2d", select_fn=(lambda x: x > 0), margin=0),
             ZoomDict(keys=["image3d"], zoom=0.95, padding_mode="constant", mode=["area"]),
             ZoomDict(keys=["image2d"], zoom=0.95, padding_mode="constant", mode=["area"]),
-            ResizeDict(keys=["image3d"], spatial_size=self.vol_shape, size_mode="longest", mode=["trilinear"], align_corners=True,),
-            ResizeDict(keys=["image2d"], spatial_size=self.img_shape, size_mode="longest", mode=["area"],),
-            DivisiblePadDict(keys=["image3d"], k=self.vol_shape, mode="constant", constant_values=0,),
-            DivisiblePadDict(keys=["image2d"], k=self.img_shape, mode="constant", constant_values=0,),
-            ToTensorDict(keys=["image3d", "image2d"],),
+            ResizeDict(keys=["image3d"], spatial_size=self.vol_shape, size_mode="longest", mode=["trilinear"], align_corners=True),
+            ResizeDict(keys=["image2d"], spatial_size=self.img_shape, size_mode="longest", mode=["area"]),
+            DivisiblePadDict(keys=["image3d"], k=self.vol_shape, mode="constant", constant_values=0),
+            DivisiblePadDict(keys=["image2d"], k=self.img_shape, mode="constant", constant_values=0),
+            ToTensorDict(keys=["image3d", "image2d"]),
         ])
 
         self.test_datasets = UnpairedDataset(
@@ -293,11 +328,16 @@ class UnpairedDataModule(LightningDataModule):
 def cache_paths_for_ct(project_root: str, ct_path: str) -> tuple[str, str, str, str]:
     """
     Generate cache paths for CT volume, video, image, and text prompt.
-    
+
+    Args:
+        project_root: Root directory of the project
+        ct_path: Path to the CT file
+
     Returns:
-        Tuple of (volume_path, video_path, image_path, prompt_path)
+        Tuple of (vol_path, vid_path, img_path, prompt_path)
     """
     import hashlib
+
     stem = hashlib.sha1(os.path.abspath(ct_path).encode("utf-8")).hexdigest()
     vol_dir = os.path.join(project_root, "cache", "vol")
     vid_dir = os.path.join(project_root, "cache", "vid")
