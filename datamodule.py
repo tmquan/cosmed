@@ -34,21 +34,43 @@ from monai.transforms import (
 from monai.utils import set_determinism
 from pytorch_lightning import LightningDataModule, seed_everything
 
+from transforms import ClipMinIntensityDict
+
+# Import cache_paths_for_ct for backward compatibility
+try:
+    from process_nifty_to_video import cache_paths_for_ct
+except ImportError:
+    # Fallback definition if process_nifty_to_video is not available
+    def cache_paths_for_ct(project_root: str, ct_path: str) -> tuple[str, str, str, str]:
+        """
+        Generate cache paths for CT volume, video, image, and text prompt.
+
+        Args:
+            project_root: Root directory of the project
+            ct_path: Path to the CT file
+
+        Returns:
+            Tuple of (vol_path, vid_path, img_path, prompt_path)
+        """
+        import hashlib
+
+        stem = hashlib.sha1(os.path.abspath(ct_path).encode("utf-8")).hexdigest()
+        vol_dir = os.path.join(project_root, "cache", "vol")
+        vid_dir = os.path.join(project_root, "cache", "vid")
+        img_dir = os.path.join(project_root, "cache", "img")
+        txt_dir = os.path.join(project_root, "cache", "txt")
+        os.makedirs(vol_dir, exist_ok=True)
+        os.makedirs(vid_dir, exist_ok=True)
+        os.makedirs(img_dir, exist_ok=True)
+        os.makedirs(txt_dir, exist_ok=True)
+        return (
+            os.path.join(vol_dir, f"{stem}.nii.gz"),
+            os.path.join(vid_dir, f"{stem}.mp4"),
+            os.path.join(img_dir, f"{stem}.png"),
+            os.path.join(txt_dir, f"{stem}.txt"),
+        )
+
 seed_everything(21, workers=True)
-
-
-class ClipMinIntensityDict(MapTransform):
-    """Clip intensity values to a minimum threshold, leave max unbounded."""
-
-    def __init__(self, keys, min_val: float = -512):
-        super().__init__(keys)
-        self.min_val = min_val
-
-    def __call__(self, data):
-        d = dict(data)
-        for key in self.keys:
-            d[key] = torch.clamp(d[key], min=self.min_val)
-        return d
 
 
 class UnpairedDataset(CacheDataset, Randomizable):
@@ -325,41 +347,10 @@ class UnpairedDataModule(LightningDataModule):
         return self.test_loader
 
 
-def cache_paths_for_ct(project_root: str, ct_path: str) -> tuple[str, str, str, str]:
-    """
-    Generate cache paths for CT volume, video, image, and text prompt.
-
-    Args:
-        project_root: Root directory of the project
-        ct_path: Path to the CT file
-
-    Returns:
-        Tuple of (vol_path, vid_path, img_path, prompt_path)
-    """
-    import hashlib
-
-    stem = hashlib.sha1(os.path.abspath(ct_path).encode("utf-8")).hexdigest()
-    vol_dir = os.path.join(project_root, "cache", "vol")
-    vid_dir = os.path.join(project_root, "cache", "vid")
-    img_dir = os.path.join(project_root, "cache", "img")
-    txt_dir = os.path.join(project_root, "cache", "txt")
-    os.makedirs(vol_dir, exist_ok=True)
-    os.makedirs(vid_dir, exist_ok=True)
-    os.makedirs(img_dir, exist_ok=True)
-    os.makedirs(txt_dir, exist_ok=True)
-    return (
-        os.path.join(vol_dir, f"{stem}.nii.gz"),
-        os.path.join(vid_dir, f"{stem}.mp4"),
-        os.path.join(img_dir, f"{stem}.png"),
-        os.path.join(txt_dir, f"{stem}.txt"),
-    )
-
-
-
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--seed", type=int, default=2222)
-    parser.add_argument("--datadir", type=str, default="/workspace/data", help="data directory")
+    parser.add_argument("--datadir", type=str, default="/workspace/datasets/ChestXRLungSegmentation", help="data directory")
     parser.add_argument("--img_shape", type=int, default=256, help="isotropic img shape")
     parser.add_argument("--vol_shape", type=int, default=256, help="isotropic vol shape")
     parser.add_argument("--batch_size", type=int, default=2, help="batch size")
@@ -373,29 +364,29 @@ if __name__ == "__main__":
     print("="*80)
     
     train_ct_folders = [
-        os.path.join(hparams.datadir, "ChestXRLungSegmentation/NSCLC/processed/train/images"),
-        os.path.join(hparams.datadir, "ChestXRLungSegmentation/MOSMED/processed/train/images/CT-0"),
-        os.path.join(hparams.datadir, "ChestXRLungSegmentation/MOSMED/processed/train/images/CT-1"),
-        os.path.join(hparams.datadir, "ChestXRLungSegmentation/MOSMED/processed/train/images/CT-2"),
-        os.path.join(hparams.datadir, "ChestXRLungSegmentation/MOSMED/processed/train/images/CT-3"),
-        os.path.join(hparams.datadir, "ChestXRLungSegmentation/MOSMED/processed/train/images/CT-4"),
-        os.path.join(hparams.datadir, "ChestXRLungSegmentation/Imagenglab/processed/train/images"),
+        os.path.join(hparams.datadir, "NSCLC/processed/train/images"),
+        os.path.join(hparams.datadir, "MOSMED/processed/train/images/CT-0"),
+        os.path.join(hparams.datadir, "MOSMED/processed/train/images/CT-1"),
+        os.path.join(hparams.datadir, "MOSMED/processed/train/images/CT-2"),
+        os.path.join(hparams.datadir, "MOSMED/processed/train/images/CT-3"),
+        os.path.join(hparams.datadir, "MOSMED/processed/train/images/CT-4"),
+        os.path.join(hparams.datadir, "Imagenglab/processed/train/images"),
     ]
 
     train_xr_folders = [
-        os.path.join(hparams.datadir, "ChestXRLungSegmentation/VinDr/v1/processed/train/images/"),
+        os.path.join(hparams.datadir, "VinDr/v1/processed/train/images/"),
     ]
 
     val_ct_folders = train_ct_folders
     val_xr_folders = [
-        os.path.join(hparams.datadir, "ChestXRLungSegmentation/VinDr/v1/processed/test/images/"),
+        os.path.join(hparams.datadir, "VinDr/v1/processed/test/images/"),
     ]
 
     test_ct_folders = [
-        os.path.join(hparams.datadir, "ChestXRLungSegmentation/TCIA/images/"),
+        os.path.join(hparams.datadir, "TCIA/images/"),
     ]
     test_xr_folders = [
-        os.path.join(hparams.datadir, "ChestXRLungSegmentation/VinDr/v1/processed/test/images/"),
+        os.path.join(hparams.datadir, "VinDr/v1/processed/test/images/"),
     ]
 
     datamodule = UnpairedDataModule(

@@ -1,11 +1,10 @@
 import glob
+import hashlib
 import os
 from argparse import ArgumentParser
 from pathlib import Path
 from typing import List, Optional
 
-import imageio
-import nibabel as nib
 import numpy as np
 import torch
 from monai.transforms import (
@@ -31,8 +30,37 @@ from rich.progress import (
     track,
 )
 
-from cm_datamodule import ClipMinIntensityDict, cache_paths_for_ct
 from dvr.renderer import ObjectCentricXRayVolumeRenderer
+from transforms import ClipMinIntensityDict
+from utilities import save_img_as_png, save_vid_as_mp4, save_vol_as_nifti
+
+
+def create_ct_cache_path(destination: str, ct_path: str) -> tuple[str, str, str, str]:
+    """
+    Generate cache paths for CT volume, video, image, and text prompt.
+
+    Args:
+        destination: Root directory of the project
+        ct_path: Path to the CT file
+
+    Returns:
+        Tuple of (vol_path, vid_path, img_path, prompt_path)
+    """
+    stem = hashlib.sha1(os.path.abspath(ct_path).encode("utf-8")).hexdigest()
+    vol_dir = os.path.join(destination, "vol")
+    vid_dir = os.path.join(destination, "vid")
+    img_dir = os.path.join(destination, "img")
+    txt_dir = os.path.join(destination, "txt")
+    os.makedirs(vol_dir, exist_ok=True)
+    os.makedirs(vid_dir, exist_ok=True)
+    os.makedirs(img_dir, exist_ok=True)
+    os.makedirs(txt_dir, exist_ok=True)
+    return (
+        os.path.join(vol_dir, f"{stem}.nii.gz"),
+        os.path.join(vid_dir, f"{stem}.mp4"),
+        os.path.join(img_dir, f"{stem}.png"),
+        os.path.join(txt_dir, f"{stem}.txt"),
+    )
 
 
 def create_ct_transforms(vol_shape: int = 256) -> Compose:
@@ -58,6 +86,82 @@ def create_ct_transforms(vol_shape: int = 256) -> Compose:
     ])
 
 
+def create_multiview_cameras(
+    num_frames: int = 121,
+    dist: float = 6.0,
+    elev: float = 0.0,
+    fov: float = 20.0,
+    device: str = "cuda",
+) -> list:
+    """
+    Create cameras for 360-degree rotation.
+    
+    Args:
+        num_frames: Number of frames for 360-degree rotation (default: 121)
+        dist: Camera distance from origin
+        elev: Camera elevation angle in degrees
+        fov: Field of view in degrees
+        device: Device to place cameras on
+    
+    Returns:
+        List of FoVPerspectiveCameras objects
+    """
+    cameras = []
+    azimuths = torch.linspace(0, 360, num_frames)
+    
+    for azimuth in azimuths:
+        # Create camera at this azimuth
+        R, T = look_at_view_transform(
+            dist=dist,
+            elev=elev,
+            azim=azimuth.item(),
+        )
+        
+        camera = FoVPerspectiveCameras(
+            R=R,
+            T=T,
+            fov=fov,
+            device=device,
+        )
+        cameras.append(camera)
+    
+    return cameras
+
+
+def create_renderer(
+    img_shape: int = 256,
+    n_pts_per_ray: int = 512,
+    min_depth: float = 4.0,
+    max_depth: float = 8.0,
+    ndc_extent: float = 1.0,
+    device: str = "cuda",
+) -> ObjectCentricXRayVolumeRenderer:
+    """
+    Create X-ray volume renderer.
+    
+    Args:
+        img_shape: Output image shape (width and height)
+        n_pts_per_ray: Number of sampling points per ray
+        min_depth: Minimum depth for ray marching
+        max_depth: Maximum depth for ray marching
+        ndc_extent: NDC extent for rendering
+        device: Device to place renderer on
+    
+    Returns:
+        ObjectCentricXRayVolumeRenderer instance
+    """
+    renderer = ObjectCentricXRayVolumeRenderer(
+        image_width=img_shape,
+        image_height=img_shape,
+        n_pts_per_ray=n_pts_per_ray,
+        min_depth=min_depth,
+        max_depth=max_depth,
+        ndc_extent=ndc_extent,
+    ).to(device)
+    
+    return renderer
+
+
 def generate_multiview_projections(
     vol: torch.Tensor,
     num_frames: int = 121,
@@ -65,6 +169,8 @@ def generate_multiview_projections(
     device: str = "cuda",
     dist: float = 6.0,
     elev: float = 0.0,
+    renderer: Optional[ObjectCentricXRayVolumeRenderer] = None,
+    cameras: Optional[list] = None,
 ) -> torch.Tensor:
     """
     Generate 360-degree rotational views from a CT vol using DVR.
@@ -76,6 +182,8 @@ def generate_multiview_projections(
         device: Device to use for rendering
         dist: Camera distance
         elev: Camera elevation angle
+        renderer: Pre-created renderer (if None, will create new one)
+        cameras: Pre-created list of cameras (if None, will create new ones)
 
     Returns:
         Video tensor of shape (1, 1, T, H, W) where T = num_frames
@@ -87,40 +195,27 @@ def generate_multiview_projections(
     # Move vol to device
     vol = vol.to(device)
     
-    # Initialize the renderer
-    renderer = ObjectCentricXRayVolumeRenderer(
-        image_width=img_shape,
-        image_height=img_shape,
-        n_pts_per_ray=512,
-        min_depth=4.0,
-        max_depth=8.0,
-        ndc_extent=1.0,
-    ).to(device)
+    # Create or reuse renderer
+    if renderer is None:
+        renderer = create_renderer(img_shape=img_shape, device=device)
     
-    # Generate camera views
-    frames = []
-    azimuths = torch.linspace(0, 360, num_frames)
-    
-    for azimuth in track(azimuths, description="Rendering frames", transient=True):
-        # Create camera at this azimuth
-        R, T = look_at_view_transform(
+    # Create or reuse cameras
+    if cameras is None:
+        cameras = create_multiview_cameras(
+            num_frames=num_frames,
             dist=dist,
             elev=elev,
-            azim=azimuth.item(),
-        )
-        
-        cameras = FoVPerspectiveCameras(
-            R=R,
-            T=T,
-            fov=20.0,
             device=device,
         )
-        
+    
+    # Render all views
+    frames = []
+    for camera in track(cameras, description="Rendering frames", transient=True):
         # Render the view
         with torch.no_grad():
             projection = renderer(
                 image3d=vol,
-                cameras=cameras,
+                cameras=camera,
                 opacity=None,
                 norm_type="minimized",
                 scaling_factor=1.0,
@@ -134,85 +229,6 @@ def generate_multiview_projections(
     vid = torch.stack(frames, dim=2)  # (1, 1, T, H, W)
     
     return vid
-
-
-def save_vid_as_mp4(
-    vid: torch.Tensor,
-    out: str,
-    fps: int = 30,
-) -> None:
-    """
-    Save vid tensor as MP4 file.
-
-    Args:
-        vid: Video tensor of shape (1, 1, T, H, W)
-        out: Path to save the MP4 file
-        fps: Frames per second for the vid
-    """
-    # Remove batch and channel dimensions
-    vid = vid.squeeze(0).squeeze(0)  # (T, H, W)
-    
-    # Convert to numpy and scale to [0, 255]
-    video_np = vid.cpu().numpy()
-    video_np = (video_np * 255).astype(np.uint8)
-    
-    # Convert to (T, H, W, 1) for grayscale
-    video_np = video_np[..., np.newaxis]
-    
-    # Save as MP4
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    imageio.mimwrite(out, video_np, fps=fps, codec='libx264', quality=8)
-
-
-def save_img_as_png(
-    vid: torch.Tensor,
-    out: str,
-) -> None:
-    """
-    Save the first frame (0° view) as XR image in PNG format.
-
-    Args:
-        vid: Video tensor of shape (1, 1, T, H, W)
-        out: Path to save the PNG file
-    """
-    # Extract first frame (0° azimuth view)
-    xr_frame = vid[0, 0, 0, :, :]  # (H, W)
-    
-    # Convert to numpy and scale to [0, 255]
-    xr_np = xr_frame.cpu().numpy()
-    xr_np = (xr_np * 255).astype(np.uint8)
-    
-    # Save as PNG
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    imageio.imwrite(out, xr_np)
-
-
-def save_vol_as_nifti(
-    vol: torch.Tensor,
-    out: str,
-) -> None:
-    """
-    Save the preprocessed CT vol as NIfTI file.
-
-    Args:
-        vol: vol tensor of shape (C, D, H, W) or (1, C, D, H, W)
-        out: Path to save the .nii.gz file
-    """
-    # Remove batch dimension if present
-    if vol.ndim == 5:
-        vol = vol.squeeze(0)  # (C, D, H, W)
-    
-    # Convert to numpy and remove channel dimension if single channel
-    vol_np = vol.cpu().numpy()
-    if vol_np.shape[0] == 1:
-        vol_np = vol_np[0]  # (D, H, W)
-    
-    # Create NIfTI image
-    nifti_img = nib.Nifti1Image(vol_np, affine=np.eye(4))
-    
-    # Save as .nii.gz
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    nib.save(nifti_img, out)
 
 
 def generate_txt_prompt(ct_path: str) -> str:
@@ -238,7 +254,7 @@ def generate_txt_prompt(ct_path: str) -> str:
 
 def process_ct_dataset(
     ct_paths: List[str],
-    project_root: str,
+    destination: str,
     num_frames: int = 121,
     img_shape: int = 256,
     vol_shape: int = 256,
@@ -252,7 +268,7 @@ def process_ct_dataset(
 
     Args:
         ct_paths: List of paths to CT .nii.gz files
-        project_root: Project root directory (for cache path generation)
+        destination: Project root directory (for cache path generation)
         num_frames: Number of frames for 360-degree rotation
         img_shape: Output image shape
         vol_shape: vol shape for preprocessing
@@ -278,7 +294,7 @@ def process_ct_dataset(
         
         for ct_path in ct_paths:
             # Get cache paths using datamodule's function
-            vol_path, vid_path, img_path, prompt_path = cache_paths_for_ct(project_root, ct_path)
+            vol_path, vid_path, img_path, prompt_path = create_ct_cache_path(destination, ct_path)
             
             # Skip if already processed
             if skip_existing and os.path.exists(vol_path) and os.path.exists(vid_path) and os.path.exists(img_path) and os.path.exists(prompt_path):
@@ -349,10 +365,10 @@ def glob_files(folders: List[str], extension: str = "*.nii.gz") -> List[str]:
 def main() -> None:
     """Main function to cache CT vols as multiview videos."""
     parser = ArgumentParser(description="Cache CT vols as multiview videos using datamodule preprocessing")
-    parser.add_argument("--datadir", type=str, default="/workspace/data", 
-                       help="Data directory (default: /workspace/data)")
-    parser.add_argument("--project_root", type=str, default=".", 
-                       help="Project root directory (default: current directory)")
+    parser.add_argument("--datadir", type=str, default="/workspace/datasets/ChestXRLungSegmentation", 
+                       help="Data directory (default: /workspace/datasets/ChestXRLungSegmentation)")
+    parser.add_argument("--destination", type=str, default="/workspace/datasets/cache", 
+                       help="Folder destination (default: /workspace/datasets/cache)")
     parser.add_argument("--num_frames", type=int, default=121, 
                        help="Number of frames for 360-degree rotation")
     parser.add_argument("--img_shape", type=int, default=256, 
@@ -370,21 +386,21 @@ def main() -> None:
     
     # Set default CT folders if not provided (matches cm_datamodule.py)
     ct_folders = [
-        os.path.join(args.datadir, "ChestXRLungSegmentation/NSCLC/processed/train/images"),
-        os.path.join(args.datadir, "ChestXRLungSegmentation/MOSMED/processed/train/images/CT-0"),
-        os.path.join(args.datadir, "ChestXRLungSegmentation/MOSMED/processed/train/images/CT-1"),
-        os.path.join(args.datadir, "ChestXRLungSegmentation/MOSMED/processed/train/images/CT-2"),
-        os.path.join(args.datadir, "ChestXRLungSegmentation/MOSMED/processed/train/images/CT-3"),
-        os.path.join(args.datadir, "ChestXRLungSegmentation/MOSMED/processed/train/images/CT-4"),
-        os.path.join(args.datadir, "ChestXRLungSegmentation/Imagenglab/processed/train/images"),
-        os.path.join(args.datadir, "ChestXRLungSegmentation/TCIA/images/"),
+        os.path.join(args.datadir, "NSCLC/processed/train/images"),
+        os.path.join(args.datadir, "MOSMED/processed/train/images/CT-0"),
+        os.path.join(args.datadir, "MOSMED/processed/train/images/CT-1"),
+        os.path.join(args.datadir, "MOSMED/processed/train/images/CT-2"),
+        os.path.join(args.datadir, "MOSMED/processed/train/images/CT-3"),
+        os.path.join(args.datadir, "MOSMED/processed/train/images/CT-4"),
+        os.path.join(args.datadir, "Imagenglab/processed/train/images"),
+        os.path.join(args.datadir, "TCIA/images/"),
     ]
     
     console.print("="*80)
     console.print("[bold magenta]CT TO VIDEO CACHE[/bold magenta]")
     console.print("="*80)
     console.print(f"[cyan]Data directory:[/cyan] {args.datadir}")
-    console.print(f"[cyan]Project root:[/cyan] {args.project_root}")
+    console.print(f"[cyan]Folder destination:[/cyan] {args.destination}")
     console.print(f"[cyan]Num frames:[/cyan] {args.num_frames}")
     console.print(f"[cyan]Image shape:[/cyan] {args.img_shape}")
     console.print(f"[cyan]vol shape:[/cyan] {args.vol_shape}")
@@ -407,7 +423,7 @@ def main() -> None:
     # Process the dataset
     process_ct_dataset(
         ct_paths=ct_paths,
-        project_root=args.project_root,
+        destination=args.destination,
         num_frames=args.num_frames,
         img_shape=args.img_shape,
         vol_shape=args.vol_shape,
