@@ -4,6 +4,7 @@ import imageio
 import nibabel as nib
 import numpy as np
 import torch
+from torchvision.io import write_video
 
 
 def save_vid_as_mp4(
@@ -12,7 +13,7 @@ def save_vid_as_mp4(
     fps: int = 30,
 ) -> None:
     """
-    Save vid tensor as MP4 file.
+    Save vid tensor as MP4 file using torchvision.
 
     Args:
         vid: Video tensor of shape (1, 1, T, H, W)
@@ -22,16 +23,15 @@ def save_vid_as_mp4(
     # Remove batch and channel dimensions
     vid = vid.squeeze(0).squeeze(0)  # (T, H, W)
     
-    # Convert to numpy and scale to [0, 255]
-    video_np = vid.cpu().numpy()
-    video_np = (video_np * 255).astype(np.uint8)
+    # Scale to [0, 255] and convert to uint8
+    vid = (vid * 255).clamp(0, 255).to(torch.uint8)
     
-    # Convert to (T, H, W, 1) for grayscale
-    video_np = video_np[..., np.newaxis]
+    # Convert from (T, H, W) to (T, H, W, 3) for RGB (torchvision requires 3 channels)
+    vid = vid.unsqueeze(-1).repeat(1, 1, 1, 3)  # (T, H, W, 3)
     
-    # Save as MP4
+    # Save as MP4 using torchvision
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    imageio.mimwrite(out, video_np, fps=fps, codec='libx264', quality=8)
+    write_video(out, vid.cpu(), fps=fps, video_codec='libx264', options={'crf': '23'})
 
 
 def save_img_as_png(

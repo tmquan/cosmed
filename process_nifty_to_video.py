@@ -35,18 +35,24 @@ from transforms import ClipMinIntensityDict
 from utilities import save_img_as_png, save_vid_as_mp4, save_vol_as_nifti
 
 
-def create_ct_cache_path(destination: str, ct_path: str) -> tuple[str, str, str, str]:
+def create_ct_cache_path(destination: str, ct_path: str, use_hash: bool = False) -> tuple[str, str, str, str]:
     """
     Generate cache paths for CT volume, video, image, and text prompt.
 
     Args:
         destination: Root directory of the project
         ct_path: Path to the CT file
+        use_hash: If True, use SHA1 hash for filename; if False, use original filename
 
     Returns:
         Tuple of (vol_path, vid_path, img_path, prompt_path)
     """
-    stem = hashlib.sha1(os.path.abspath(ct_path).encode("utf-8")).hexdigest()
+    # Choose filename strategy
+    if use_hash:
+        stem = hashlib.sha1(os.path.abspath(ct_path).encode("utf-8")).hexdigest()
+    else:
+        stem = Path(ct_path).stem.replace('.nii', '')  # Remove .nii from .nii.gz
+    
     vol_dir = os.path.join(destination, "vol")
     vid_dir = os.path.join(destination, "vid")
     img_dir = os.path.join(destination, "img")
@@ -260,6 +266,7 @@ def process_ct_dataset(
     vol_shape: int = 256,
     device: str = "cuda",
     skip_existing: bool = True,
+    use_hash: bool = False,
 ) -> None:
     """
     Process a list of CT vols and cache them as MP4 videos with prompts.
@@ -274,6 +281,7 @@ def process_ct_dataset(
         vol_shape: vol shape for preprocessing
         device: Device to use for rendering
         skip_existing: Skip files that already exist in cache
+        use_hash: If True, use SHA1 hash for filename; if False, use original filename
     """
     # Create transforms using datamodule's preprocessing
     transforms = create_ct_transforms(vol_shape=vol_shape)
@@ -294,7 +302,7 @@ def process_ct_dataset(
         
         for ct_path in ct_paths:
             # Get cache paths using datamodule's function
-            vol_path, vid_path, img_path, prompt_path = create_ct_cache_path(destination, ct_path)
+            vol_path, vid_path, img_path, prompt_path = create_ct_cache_path(destination, ct_path, use_hash)
             
             # Skip if already processed
             if skip_existing and os.path.exists(vol_path) and os.path.exists(vid_path) and os.path.exists(img_path) and os.path.exists(prompt_path):
@@ -379,6 +387,8 @@ def main() -> None:
                        help="Device to use for rendering")
     parser.add_argument("--skip_existing", action="store_true", 
                        help="Skip files that already exist in cache")
+    parser.add_argument("--use_hash", action="store_true", 
+                       help="Use SHA1 hash for filenames instead of original names")
     
     args = parser.parse_args()
     
@@ -386,14 +396,15 @@ def main() -> None:
     
     # Set default CT folders if not provided (matches cm_datamodule.py)
     ct_folders = [
-        os.path.join(args.datadir, "NSCLC/processed/train/images"),
-        os.path.join(args.datadir, "MOSMED/processed/train/images/CT-0"),
-        os.path.join(args.datadir, "MOSMED/processed/train/images/CT-1"),
-        os.path.join(args.datadir, "MOSMED/processed/train/images/CT-2"),
-        os.path.join(args.datadir, "MOSMED/processed/train/images/CT-3"),
-        os.path.join(args.datadir, "MOSMED/processed/train/images/CT-4"),
-        os.path.join(args.datadir, "Imagenglab/processed/train/images"),
-        os.path.join(args.datadir, "TCIA/images/"),
+        # os.path.join(args.datadir, "NSCLC/processed/train/images"),
+        # os.path.join(args.datadir, "MOSMED/processed/train/images/CT-0"),
+        # os.path.join(args.datadir, "MOSMED/processed/train/images/CT-1"),
+        # os.path.join(args.datadir, "MOSMED/processed/train/images/CT-2"),
+        # os.path.join(args.datadir, "MOSMED/processed/train/images/CT-3"),
+        # os.path.join(args.datadir, "MOSMED/processed/train/images/CT-4"),
+        # os.path.join(args.datadir, "Imagenglab/processed/train/images"),
+        # os.path.join(args.datadir, "TCIA/images/"),
+        os.path.join(args.datadir, "maisi/images/"),
     ]
     
     console.print("="*80)
@@ -406,6 +417,7 @@ def main() -> None:
     console.print(f"[cyan]vol shape:[/cyan] {args.vol_shape}")
     console.print(f"[cyan]Device:[/cyan] {args.device}")
     console.print(f"[cyan]Skip existing:[/cyan] {args.skip_existing}")
+    console.print(f"[cyan]Use hash:[/cyan] {args.use_hash}")
     console.print("="*80)
     
     # Find all CT files using datamodule logic
@@ -429,6 +441,7 @@ def main() -> None:
         vol_shape=args.vol_shape,
         device=args.device,
         skip_existing=args.skip_existing,
+        use_hash=args.use_hash,
     )
     
     console.print("\n[bold green]✓ CT to vid caching complete![/bold green]")
