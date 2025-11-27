@@ -41,3 +41,16 @@ numpy==1.26.4
 # Configuration files
 pyyaml>=6.0
 
+# Cosmed specific dependencies
+# PyTorch Lightning
+lightning>=2.0.0
+
+# Video processing
+av>=10.0.0
+
+# Diffusion models
+diffusers>=0.20.0
+
+# Transformer models
+transformers>=4.30.0
+
