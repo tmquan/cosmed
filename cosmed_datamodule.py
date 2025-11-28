@@ -41,7 +41,7 @@ from monai.transforms import (
 from monai.utils import set_determinism
 from lightning import LightningDataModule, seed_everything
 
-from transforms import ClipMinIntensityDict
+from transforms import ClipMinIntensityDict, TransposeDict
 
 try:
     from process_nifty_to_video import cache_paths_for_ct
@@ -401,12 +401,14 @@ class CosmedDataModule(LightningDataModule):
             # Load cached CT frontal images and videos (already preprocessed)
             LoadImageDict(keys=["ct_front"]),
             EnsureChannelFirstDict(keys=["ct_front"]),
+            TransposeDict(keys=["ct_front"]),  # Transpose ct_front (swap H and W)
             ScaleIntensityDict(keys=["ct_front"], minv=0.0, maxv=1.0),  # Normalize PNG from [0, 255] to [0, 1]
             LoadVideoDict(keys=["ct_video"], num_frames=self.num_frames, img_shape=self.img_shape),
             
             # Load XR images - check if cache exists first
             LoadImageDict(keys=["xr_image"]),
             EnsureChannelFirstDict(keys=["xr_image"]),
+            TransposeDict(keys=["xr_image"]),  # Transpose xr_image (swap H and W)
             ScaleIntensityDict(keys=["xr_image"], minv=0.0, maxv=1.0),
             
             # Add augmentations only (no preprocessing since data is cached)
@@ -486,12 +488,14 @@ class CosmedDataModule(LightningDataModule):
             # Load cached CT frontal images and videos (already preprocessed)
             LoadImageDict(keys=["ct_front"]),
             EnsureChannelFirstDict(keys=["ct_front"]),
+            TransposeDict(keys=["ct_front"]),  # Transpose ct_front (swap H and W)
             ScaleIntensityDict(keys=["ct_front"], minv=0.0, maxv=1.0),  # Normalize PNG from [0, 255] to [0, 1]
             LoadVideoDict(keys=["ct_video"], num_frames=self.num_frames, img_shape=self.img_shape),
             
             # Load XR images from cache
             LoadImageDict(keys=["xr_image"]),
             EnsureChannelFirstDict(keys=["xr_image"]),
+            TransposeDict(keys=["xr_image"]),  # Transpose xr_image (swap H and W)
             ScaleIntensityDict(keys=["xr_image"], minv=0.0, maxv=1.0),
             
             ToTensorDict(keys=["xr_image", "ct_front", "ct_video"]),

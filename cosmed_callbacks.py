@@ -222,102 +222,91 @@ class CosmedVisualizationCallback(Callback):
         if self.save_to_disk and self.output_dir:
             self.output_dir.mkdir(parents=True, exist_ok=True)
     
-    def on_validation_epoch_end(
-        self, 
-        trainer: Trainer, 
-        pl_module: LightningModule
+    def on_validation_batch_end(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        outputs: Any,
+        batch: Any,
+        batch_idx: int,
+        dataloader_idx: int = 0,
     ) -> None:
-        """Generate and log samples at the end of validation epoch."""
+        """Generate and log samples on the first batch of validation."""
+        # Only visualize for the first batch
+        if batch_idx != 0:
+            return
+        
         # Only log every N epochs
         if trainer.current_epoch % self.log_every_n_epochs != 0:
             return
         
-        # Get validation dataloader
-        val_dataloader = trainer.val_dataloaders
-        if val_dataloader is None:
-            return
-        
-        # Handle both single dataloader and list of dataloaders
-        if isinstance(val_dataloader, list):
-            if len(val_dataloader) == 0:
-                return
-            dataloader = val_dataloader[0]
-        else:
-            dataloader = val_dataloader
-        
-        # Set model to eval mode
-        pl_module.eval()
         device = pl_module.device
         
-        # Collect samples
+        # Collect samples from this batch
         ct_samples = []
         xr_samples = []
         
         try:
             with torch.no_grad(), torch.cuda.amp.autocast(enabled=False):
-                for batch_idx, batch in enumerate(dataloader):
-                    if len(ct_samples) >= self.num_samples and len(xr_samples) >= self.num_samples:
-                        break
+                # Process CT samples - one at a time to avoid batch size mismatch
+                if 'ct_front' in batch and 'ct_video' in batch:
+                    ct_front = batch['ct_front'].to(device=device, dtype=torch.float32)
+                    ct_video_target = batch['ct_video'].to(device=device, dtype=torch.float32)
                     
-                    # Process CT samples - one at a time to avoid batch size mismatch
-                    if 'ct_front' in batch and 'ct_video' in batch and len(ct_samples) < self.num_samples:
-                        ct_front = batch['ct_front'].to(device=device, dtype=torch.float32)
-                        ct_video_target = batch['ct_video'].to(device=device, dtype=torch.float32)
+                    # Process up to num_samples from this batch
+                    for i in range(min(ct_front.shape[0], self.num_samples)):
+                        single_input = ct_front[i:i+1]  # Keep batch dim (1, C, H, W)
                         
-                        # Process one sample at a time to avoid batch size issues
-                        for i in range(min(ct_front.shape[0], self.num_samples - len(ct_samples))):
-                            single_input = ct_front[i:i+1]  # Keep batch dim (1, C, H, W)
-                            
-                            # Generate prediction
-                            if hasattr(pl_module, 'predict_step'):
-                                pred_batch = {'ct_front': single_input}
-                                pred_results = pl_module.predict_step(pred_batch, batch_idx)
-                                ct_video_pred = pred_results.get('ct_video', None)
-                            else:
-                                ct_video_pred = pl_module(single_input, prompt="360 degree rotation of chest CT scan")
-                            
-                            if ct_video_pred is not None:
-                                if ct_video_pred.dtype != torch.float32:
-                                    ct_video_pred = ct_video_pred.to(dtype=torch.float32)
-                                
-                                # Remove batch dim if present
-                                if ct_video_pred.ndim >= 4 and ct_video_pred.shape[0] == 1:
-                                    ct_video_pred = ct_video_pred[0]
-                                
-                                ct_samples.append({
-                                    'input': ct_front[i],
-                                    'target': ct_video_target[i] if ct_video_target is not None else None,
-                                    'prediction': ct_video_pred,
-                                })
-                
-                    # Process XR samples - one at a time to avoid batch size mismatch
-                    if 'xr_image' in batch and len(xr_samples) < self.num_samples:
-                        xr_image = batch['xr_image'].to(device=device, dtype=torch.float32)
+                        # Generate prediction
+                        if hasattr(pl_module, 'predict_step'):
+                            pred_batch = {'ct_front': single_input}
+                            pred_results = pl_module.predict_step(pred_batch, batch_idx)
+                            ct_video_pred = pred_results.get('ct_video', None)
+                        else:
+                            ct_video_pred = pl_module(single_input, prompt="360 degree rotation of chest CT scan")
                         
-                        # Process one sample at a time to avoid batch size issues
-                        for i in range(min(xr_image.shape[0], self.num_samples - len(xr_samples))):
-                            single_input = xr_image[i:i+1]  # Keep batch dim (1, C, H, W)
+                        if ct_video_pred is not None:
+                            if ct_video_pred.dtype != torch.float32:
+                                ct_video_pred = ct_video_pred.to(dtype=torch.float32)
                             
-                            # Generate prediction
-                            if hasattr(pl_module, 'predict_step'):
-                                pred_batch = {'xr_image': single_input}
-                                pred_results = pl_module.predict_step(pred_batch, batch_idx)
-                                xr_video_pred = pred_results.get('xr_video', None)
-                            else:
-                                xr_video_pred = pl_module(single_input, prompt="360 degree rotation of chest X-ray")
+                            # Remove batch dim if present
+                            if ct_video_pred.ndim >= 4 and ct_video_pred.shape[0] == 1:
+                                ct_video_pred = ct_video_pred[0]
                             
-                            if xr_video_pred is not None:
-                                if xr_video_pred.dtype != torch.float32:
-                                    xr_video_pred = xr_video_pred.to(dtype=torch.float32)
-                                
-                                # Remove batch dim if present
-                                if xr_video_pred.ndim >= 4 and xr_video_pred.shape[0] == 1:
-                                    xr_video_pred = xr_video_pred[0]
-                                
-                                xr_samples.append({
-                                    'input': xr_image[i],
-                                    'prediction': xr_video_pred,
-                                })
+                            ct_samples.append({
+                                'input': ct_front[i],
+                                'target': ct_video_target[i] if ct_video_target is not None else None,
+                                'prediction': ct_video_pred,
+                            })
+            
+                # Process XR samples - one at a time to avoid batch size mismatch
+                if 'xr_image' in batch:
+                    xr_image = batch['xr_image'].to(device=device, dtype=torch.float32)
+                    
+                    # Process up to num_samples from this batch
+                    for i in range(min(xr_image.shape[0], self.num_samples)):
+                        single_input = xr_image[i:i+1]  # Keep batch dim (1, C, H, W)
+                        
+                        # Generate prediction
+                        if hasattr(pl_module, 'predict_step'):
+                            pred_batch = {'xr_image': single_input}
+                            pred_results = pl_module.predict_step(pred_batch, batch_idx)
+                            xr_video_pred = pred_results.get('xr_video', None)
+                        else:
+                            xr_video_pred = pl_module(single_input, prompt="360 degree rotation of chest X-ray")
+                        
+                        if xr_video_pred is not None:
+                            if xr_video_pred.dtype != torch.float32:
+                                xr_video_pred = xr_video_pred.to(dtype=torch.float32)
+                            
+                            # Remove batch dim if present
+                            if xr_video_pred.ndim >= 4 and xr_video_pred.shape[0] == 1:
+                                xr_video_pred = xr_video_pred[0]
+                            
+                            xr_samples.append({
+                                'input': xr_image[i],
+                                'prediction': xr_video_pred,
+                            })
         except Exception as e:
             print(f"Warning: Error collecting samples in callback: {e}")
             return
@@ -331,9 +320,16 @@ class CosmedVisualizationCallback(Callback):
                 self._visualize_xr_samples(xr_samples, trainer, pl_module, trainer.current_epoch)
         except Exception as e:
             print(f"Warning: Error generating visualizations in callback: {e}")
-        finally:
-            # Always set model back to training mode
-            pl_module.train()
+    
+    def on_validation_epoch_end(
+        self, 
+        trainer: Trainer, 
+        pl_module: LightningModule
+    ) -> None:
+        """Called at the end of validation epoch - visualization is done in on_validation_batch_end."""
+        # Visualization is now done in on_validation_batch_end for the first batch
+        # This method is kept for potential future use (e.g., aggregate statistics)
+        pass
     
     def _normalize_video(self, video: torch.Tensor) -> torch.Tensor:
         """Normalize video to (T, H, W) grayscale format.

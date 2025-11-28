@@ -251,114 +251,19 @@ class CosmedModelWrapper(LightningModule):
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Validation step for PyTorch Lightning.
         
-        Computes three losses:
-        1. CT video loss: Generated CT rotation video vs target CT video
-        2. XR input loss: First frame of generated XR video vs input XR image
-        3. XR cycle loss: First frame vs last frame (360° cycle consistency)
-        
-        Processes all samples in the batch by generating videos one at a time
-        and then computing losses on the full batch.
+        Uses training_step for loss computation since Cosmos model's validation_step
+        may not be implemented or returns None.
         """
         if self.model is None:
             raise RuntimeError("Model not initialized. Call setup() first.")
         
-        losses = {}
-        total_loss = torch.tensor(0.0, device=self.device)
+        cosmos_batch = self._prepare_cosmos_batch(batch)
         
         try:
-            # 1. CT Video Loss: Generate from ct_front, compare to ct_video target
-            if 'ct_front' in batch and 'ct_video' in batch:
-                ct_front_batch = batch['ct_front']  # (B, C, H, W)
-                ct_video_target_batch = batch['ct_video']  # (B, T, H, W)
-                
-                # Generate CT rotation video for entire batch
-                ct_video_output_batch = self.generate_batch(
-                    ct_front_batch, 
-                    prompt=DEFAULT_CT_PROMPT, 
-                    show_progress=False
-                )
-                
-                # Normalize to (B, T, H, W)
-                ct_video_output_batch = self._normalize_video_for_loss(ct_video_output_batch)
-                ct_video_target_norm = self._normalize_video_for_loss(ct_video_target_batch)
-                
-                # Ensure same number of frames by interpolating if needed
-                if ct_video_output_batch.shape[1] != ct_video_target_norm.shape[1]:
-                    # (B, T, H, W) -> (B, 1, T, H, W) for trilinear interpolation
-                    ct_video_output_5d = rearrange(ct_video_output_batch, 'b t h w -> b 1 t h w')
-                    ct_video_output_5d = F.interpolate(
-                        ct_video_output_5d,
-                        size=(ct_video_target_norm.shape[1], ct_video_target_norm.shape[2], ct_video_target_norm.shape[3]),
-                        mode='trilinear',
-                        align_corners=False
-                    )
-                    ct_video_output_batch = rearrange(ct_video_output_5d, 'b 1 t h w -> b t h w')
-                
-                # Ensure same spatial size
-                if ct_video_output_batch.shape[-2:] != ct_video_target_norm.shape[-2:]:
-                    ct_video_output_batch = F.interpolate(
-                        ct_video_output_batch,
-                        size=ct_video_target_norm.shape[-2:],
-                        mode='bilinear',
-                        align_corners=False
-                    )
-                
-                # Compute MSE loss
-                ct_loss = F.mse_loss(ct_video_output_batch, ct_video_target_norm)
-                losses['val/ct_video_loss'] = ct_loss
-                total_loss = total_loss + ct_loss
-            
-            # 2 & 3. XR Losses: Generate from xr_image, compute input and cycle losses
-            if 'xr_image' in batch:
-                xr_image_batch = batch['xr_image']  # (B, C, H, W)
-                batch_size = xr_image_batch.shape[0]
-                
-                # Generate XR rotation video for each sample in batch
-                xr_video_preds = []
-                for i in range(batch_size):
-                    xr_image_single = xr_image_batch[i:i+1]  # (1, C, H, W)
-                    xr_video_pred = self.generate(
-                        xr_image_single, 
-                        prompt=DEFAULT_XR_PROMPT, 
-                        show_progress=False
-                    )
-                    # Normalize to (1, T, H, W)
-                    xr_video_pred = self._normalize_video_for_loss(xr_video_pred)
-                    xr_video_preds.append(xr_video_pred)
-                
-                # Stack predictions: (B, T, H, W)
-                xr_video_output_batch = torch.cat(xr_video_preds, dim=0)
-                
-                # XR Input Loss: First frame should match input image
-                xr_first_frames = xr_video_output_batch[:, 0:1, :, :]  # (B, 1, H, W)
-                xr_input_normed = self._normalize_image_for_loss(xr_image_batch)  # (B, 1, H, W)
-                
-                # Ensure same spatial size
-                if xr_first_frames.shape[-2:] != xr_input_normed.shape[-2:]:
-                    xr_first_frames = F.interpolate(
-                        xr_first_frames, 
-                        size=xr_input_normed.shape[-2:], 
-                        mode='bilinear', 
-                        align_corners=False
-                    )
-                
-                xr_input_loss = F.mse_loss(xr_first_frames, xr_input_normed)
-                losses['val/xr_input_loss'] = xr_input_loss
-                total_loss = total_loss + xr_input_loss
-                
-                # XR Cycle Loss: Last frame should match first frame (360° rotation)
-                xr_last_frames = xr_video_output_batch[:, -1:, :, :]  # (B, 1, H, W)
-                xr_cycle_loss = F.mse_loss(xr_last_frames, xr_input_normed)
-                losses['val/xr_cycle_loss'] = xr_cycle_loss
-                total_loss = total_loss + xr_cycle_loss
-            
-            # Log all losses
-            for name, loss_val in losses.items():
-                self.log(name, loss_val, prog_bar=False, on_step=False, on_epoch=True, sync_dist=True)
-            
-            self.log("val/loss", total_loss, prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
-            return total_loss
-            
+            # Use training_step for validation since Cosmos's validation_step may return None
+            output_batch, loss = self.model.training_step(cosmos_batch, iteration=batch_idx)
+            self.log("val/loss", loss, prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
+            return loss
         except Exception as e:
             log.error(f"Error in validation step: {e}")
             return torch.tensor(0.0, device=self.device)
