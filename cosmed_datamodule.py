@@ -393,15 +393,15 @@ class CosmedDataModule(LightningDataModule):
         """
         Training data contains:
         - ct_video: 360° rotation video from CT (shape: T, H, W) - loaded from cache
-        - ct_frontal: Frontal XR-like image from CT (shape: H, W) - loaded from cache
+        - ct_front: Frontal XR-like image from CT (shape: H, W) - loaded from cache
         - xr_image: Real XR frontal image (shape: H, W) - loaded from cache if available
         """
         # For cached data, we only need to load the files, not preprocess them
         self.train_transforms = Compose([
             # Load cached CT frontal images and videos (already preprocessed)
-            LoadImageDict(keys=["ct_frontal"]),
-            EnsureChannelFirstDict(keys=["ct_frontal"]),
-            ScaleIntensityDict(keys=["ct_frontal"], minv=0.0, maxv=1.0),  # Normalize PNG from [0, 255] to [0, 1]
+            LoadImageDict(keys=["ct_front"]),
+            EnsureChannelFirstDict(keys=["ct_front"]),
+            ScaleIntensityDict(keys=["ct_front"], minv=0.0, maxv=1.0),  # Normalize PNG from [0, 255] to [0, 1]
             LoadVideoDict(keys=["ct_video"], num_frames=self.num_frames, img_shape=self.img_shape),
             
             # Load XR images - check if cache exists first
@@ -410,10 +410,10 @@ class CosmedDataModule(LightningDataModule):
             ScaleIntensityDict(keys=["xr_image"], minv=0.0, maxv=1.0),
             
             # Add augmentations only (no preprocessing since data is cached)
-            # RandShiftIntensityDict(keys=["ct_frontal"], prob=0.5, offsets=0.1, safe=True),
-            # RandGaussianNoiseDict(keys=["ct_frontal"], prob=0.3, mean=0.0, std=0.05),
+            # RandShiftIntensityDict(keys=["ct_front"], prob=0.5, offsets=0.1, safe=True),
+            # RandGaussianNoiseDict(keys=["ct_front"], prob=0.3, mean=0.0, std=0.05),
             
-            ToTensorDict(keys=["xr_image", "ct_frontal", "ct_video"]),
+            ToTensorDict(keys=["xr_image", "ct_front", "ct_video"]),
         ])
 
         # Create dataset - only reference cached files, not raw CT volumes
@@ -423,7 +423,7 @@ class CosmedDataModule(LightningDataModule):
         ):
             train_data.append({
                 "ct_video": vid_cache,      # Cached video
-                "ct_frontal": img_cache,    # Cached frontal image
+                "ct_front": img_cache,    # Cached frontal image
             })
         
         # Check if XR cache exists, otherwise use raw XR files
@@ -459,10 +459,10 @@ class CosmedDataModule(LightningDataModule):
         print(f"Train data: {xr_cached_count} XR cached, {xr_raw_count} XR raw")
         
         self.train_datasets = CosmedDataset(
-            keys=["ct_video", "ct_frontal", "xr_image"],
+            keys=["ct_video", "ct_front", "xr_image"],
             data=[
                 [d["ct_video"] for d in train_data],
-                [d["ct_frontal"] for d in train_data],
+                [d["ct_front"] for d in train_data],
                 xr_data,
             ],
             transform=self.train_transforms,
@@ -484,9 +484,9 @@ class CosmedDataModule(LightningDataModule):
         """Validation dataloader - loads cached data only."""
         self.val_transforms = Compose([
             # Load cached CT frontal images and videos (already preprocessed)
-            LoadImageDict(keys=["ct_frontal"]),
-            EnsureChannelFirstDict(keys=["ct_frontal"]),
-            ScaleIntensityDict(keys=["ct_frontal"], minv=0.0, maxv=1.0),  # Normalize PNG from [0, 255] to [0, 1]
+            LoadImageDict(keys=["ct_front"]),
+            EnsureChannelFirstDict(keys=["ct_front"]),
+            ScaleIntensityDict(keys=["ct_front"], minv=0.0, maxv=1.0),  # Normalize PNG from [0, 255] to [0, 1]
             LoadVideoDict(keys=["ct_video"], num_frames=self.num_frames, img_shape=self.img_shape),
             
             # Load XR images from cache
@@ -494,7 +494,7 @@ class CosmedDataModule(LightningDataModule):
             EnsureChannelFirstDict(keys=["xr_image"]),
             ScaleIntensityDict(keys=["xr_image"], minv=0.0, maxv=1.0),
             
-            ToTensorDict(keys=["xr_image", "ct_frontal", "ct_video"]),
+            ToTensorDict(keys=["xr_image", "ct_front", "ct_video"]),
         ])
 
         # Create dataset - only reference cached files
@@ -504,7 +504,7 @@ class CosmedDataModule(LightningDataModule):
         ):
             val_data.append({
                 "ct_video": vid_cache,      # Cached video
-                "ct_frontal": img_cache,    # Cached frontal image
+                "ct_front": img_cache,    # Cached frontal image
             })
         
         # Check if XR cache exists for validation
@@ -542,10 +542,10 @@ class CosmedDataModule(LightningDataModule):
         print(f"Val data: {xr_cached_count} XR cached, {xr_raw_count} XR raw")
 
         self.val_datasets = CosmedDataset(
-            keys=["ct_video", "ct_frontal", "xr_image"],
+            keys=["ct_video", "ct_front", "xr_image"],
             data=[
                 [d["ct_video"] for d in val_data],
-                [d["ct_frontal"] for d in val_data],
+                [d["ct_front"] for d in val_data],
                 xr_data,
             ],
             transform=self.val_transforms,
@@ -650,7 +650,7 @@ def pre_generate_cache(
     
     # Process CT volumes
     if process_ct:
-        _process_ct_volumes(
+        _process_ct_stacks(
             data_dir, cache_dir, ct_folders, img_shape, vol_shape, 
             num_frames, max_files, force, console, DVR_AVAILABLE
         )
@@ -663,7 +663,7 @@ def pre_generate_cache(
         )
 
 
-def _process_ct_volumes(
+def _process_ct_stacks(
     data_dir: str,
     cache_dir: str,
     ct_folders: Optional[List[str]],
@@ -711,15 +711,15 @@ def _process_ct_volumes(
     
     # Define transforms with CENTERED padding to prevent jiggling
     ct_transforms = Compose([
-        LoadImageDict(keys=["ct_volume"]),
-        EnsureChannelFirstDict(keys=["ct_volume"]),
-        SpacingDict(keys=["ct_volume"], pixdim=(1.0, 1.0, 1.0), mode=["bilinear"], align_corners=True),
-        OrientationDict(keys=["ct_volume"], axcodes="ASL"),
-        ClipMinIntensityDict(keys=["ct_volume"], min_val=-512),
-        ScaleIntensityDict(keys=["ct_volume"], minv=0.0, maxv=1.0),
-        ResizeDict(keys=["ct_volume"], spatial_size=vol_shape, size_mode="longest", mode=["trilinear"], align_corners=True),
+        LoadImageDict(keys=["ct_stack"]),
+        EnsureChannelFirstDict(keys=["ct_stack"]),
+        SpacingDict(keys=["ct_stack"], pixdim=(1.0, 1.0, 1.0), mode=["bilinear"], align_corners=True),
+        OrientationDict(keys=["ct_stack"], axcodes="ASL"),
+        ClipMinIntensityDict(keys=["ct_stack"], min_val=-512),
+        ScaleIntensityDict(keys=["ct_stack"], minv=0.0, maxv=1.0),
+        ResizeDict(keys=["ct_stack"], spatial_size=vol_shape, size_mode="longest", mode=["trilinear"], align_corners=True),
         # Use SpatialPadDict with "symmetric" mode for CENTERED padding
-        SpatialPadDict(keys=["ct_volume"], spatial_size=(vol_shape, vol_shape, vol_shape), mode="constant", constant_values=0, method="symmetric"),
+        SpatialPadDict(keys=["ct_stack"], spatial_size=(vol_shape, vol_shape, vol_shape), mode="constant", constant_values=0, method="symmetric"),
     ])
     
     # Set default CT folders if not provided
@@ -823,11 +823,11 @@ def _process_ct_volumes(
                     continue
                 
                 # Prepare data dict with file path (LoadImageDict expects path)
-                data = {"ct_volume": ct_file}
+                data = {"ct_stack": ct_file}
                 
                 # Apply transforms (same as val_dataloader)
                 transformed_data = apply_transform(ct_transforms, data)
-                vol_tensor = transformed_data["ct_volume"]
+                vol_tensor = transformed_data["ct_stack"]
                 
                 # Ensure proper shape for rendering
                 if vol_tensor.ndim == 3:
@@ -1343,13 +1343,13 @@ if __name__ == "__main__":
             for i, batch in enumerate(train_loader):
                 print(f"\nBatch {i}:")
                 
-                if 'ct_volume' in batch:
-                    print(f"  ✓ CT volume: shape={batch['ct_volume'].shape}, "
-                          f"range=[{batch['ct_volume'].min():.4f}, {batch['ct_volume'].max():.4f}]")
+                if 'ct_stack' in batch:
+                    print(f"  ✓ CT volume: shape={batch['ct_stack'].shape}, "
+                          f"range=[{batch['ct_stack'].min():.4f}, {batch['ct_stack'].max():.4f}]")
                 
-                if 'ct_frontal' in batch:
-                    print(f"  ✓ CT frontal: shape={batch['ct_frontal'].shape}, "
-                          f"range=[{batch['ct_frontal'].min():.4f}, {batch['ct_frontal'].max():.4f}]")
+                if 'ct_front' in batch:
+                    print(f"  ✓ CT frontal: shape={batch['ct_front'].shape}, "
+                          f"range=[{batch['ct_front'].min():.4f}, {batch['ct_front'].max():.4f}]")
                 
                 if 'ct_video' in batch:
                     print(f"  ✓ CT video: shape={batch['ct_video'].shape}, "
@@ -1377,10 +1377,10 @@ if __name__ == "__main__":
             for i, batch in enumerate(val_loader):
                 print(f"\nValidation Batch {i}:")
                 
-                if 'ct_volume' in batch:
-                    print(f"  ✓ CT volume: shape={batch['ct_volume'].shape}")
-                if 'ct_frontal' in batch:
-                    print(f"  ✓ CT frontal: shape={batch['ct_frontal'].shape}")
+                if 'ct_stack' in batch:
+                    print(f"  ✓ CT volume: shape={batch['ct_stack'].shape}")
+                if 'ct_front' in batch:
+                    print(f"  ✓ CT frontal: shape={batch['ct_front'].shape}")
                 if 'ct_video' in batch:
                     print(f"  ✓ CT video: shape={batch['ct_video'].shape}")
                 if 'xr_image' in batch:

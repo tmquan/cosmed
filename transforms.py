@@ -1,17 +1,36 @@
+"""
+Custom MONAI transforms for Cosmed.
+"""
+
+from typing import Dict, Hashable, Mapping
+
 import torch
+from monai.config import KeysCollection
 from monai.transforms import MapTransform
 
 
 class ClipMinIntensityDict(MapTransform):
-    """Clip intensity values to a minimum threshold, leave max unbounded."""
-
-    def __init__(self, keys, min_val: float = -512):
-        super().__init__(keys)
+    """
+    Dictionary-based wrapper of ClipMinIntensity.
+    Clips intensity values below a minimum value.
+    
+    Args:
+        keys: Keys to apply the transform to
+        min_val: Minimum value to clip to (default: -512 for CT HU values)
+    """
+    
+    def __init__(
+        self, 
+        keys: KeysCollection, 
+        min_val: float = -512,
+        allow_missing_keys: bool = False
+    ):
+        super().__init__(keys, allow_missing_keys)
         self.min_val = min_val
-
-    def __call__(self, data):
+    
+    def __call__(self, data: Mapping[Hashable, torch.Tensor]) -> Dict[Hashable, torch.Tensor]:
         d = dict(data)
-        for key in self.keys:
+        for key in self.key_iterator(d):
             d[key] = torch.clamp(d[key], min=self.min_val)
         return d
 
