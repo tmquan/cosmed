@@ -690,10 +690,55 @@ class CosmedModelWrapper(LightningModule):
             },
         }
     
+    def state_dict(self, *args, **kwargs):
+        """Override state_dict to handle Cosmos model's custom implementation.
+        
+        The Cosmos model's state_dict() doesn't accept standard PyTorch arguments
+        like 'destination', 'prefix', 'keep_vars'. We intercept and handle this.
+        """
+        # Get the wrapper's own state (hyperparameters saved by save_hyperparameters)
+        state = {}
+        
+        # Get model state if available
+        if self.model is not None:
+            try:
+                # Try calling without arguments first (Cosmos model's signature)
+                model_state = self.model.state_dict()
+                state['model'] = model_state
+            except Exception as e:
+                log.warning(f"Could not get model state_dict: {e}")
+        
+        # Add wrapper metadata
+        state['num_frames'] = self.num_frames
+        state['resolution'] = self.resolution
+        state['hparams'] = dict(self.hparams) if hasattr(self, 'hparams') else {}
+        
+        return state
+    
+    def load_state_dict(self, state_dict: Dict[str, Any], strict: bool = True):
+        """Override load_state_dict to handle custom state format."""
+        if 'model' in state_dict and self.model is not None:
+            try:
+                self.model.load_state_dict(state_dict['model'])
+            except Exception as e:
+                log.warning(f"Could not load model state_dict: {e}")
+        
+        if 'num_frames' in state_dict:
+            self.num_frames = state_dict['num_frames']
+        if 'resolution' in state_dict:
+            self.resolution = state_dict['resolution']
+    
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         """Called when saving checkpoint."""
         checkpoint["num_frames"] = self.num_frames
         checkpoint["resolution"] = self.resolution
+        
+        # Save model state directly to avoid state_dict signature issues
+        if self.model is not None:
+            try:
+                checkpoint["cosmos_model_state"] = self.model.state_dict()
+            except Exception as e:
+                log.warning(f"Could not save cosmos model state: {e}")
     
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         """Called when loading checkpoint."""
@@ -701,6 +746,13 @@ class CosmedModelWrapper(LightningModule):
             self.num_frames = checkpoint["num_frames"]
         if "resolution" in checkpoint:
             self.resolution = checkpoint["resolution"]
+        
+        # Load model state if available
+        if "cosmos_model_state" in checkpoint and self.model is not None:
+            try:
+                self.model.load_state_dict(checkpoint["cosmos_model_state"])
+            except Exception as e:
+                log.warning(f"Could not load cosmos model state: {e}")
 
 
 def create_inference_wrapper(
